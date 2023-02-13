@@ -1,0 +1,129 @@
+service: vacancy-sns-sqs
+
+plugins:
+  - serverless-offline
+  
+provider:
+  name: aws
+  runtime: nodejs14.x
+  stage: ${opt:stage}
+  region: us-east-1
+  stackName: ${self:service}-${opt:stage}
+  deploymentBucket:
+    name: serverless-deploy
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action: 
+            - "sns:*"
+          Resource:
+            - "*"
+
+functions:
+  PublisherFunction:
+    name: publisher-lambda-${opt:stage}
+    handler: handler.publisherLambda
+    memorySize: 256
+    timeout: 10
+    events:
+      - httpApi: 'POST /vacancy'
+
+  SubscriberFunction:
+    name: subscriber-lambda-${opt:stage}
+    handler: handler.subscriberLambda
+    memorySize: 256
+    timeout: 10
+    events:
+      - sqs:
+          arn: 
+            Fn::GetAtt:
+              - MySQSQueue
+              - Arn
+          batchSize: 1
+  handleDLQ:
+    name: dlq-lambda-${opt:stage}
+    handler: handler.dlqLambda
+    memorySize: 256
+    timeout: 10
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - MySQSQueueDLQ
+              - Arn
+          batchSize: 1
+
+resources:
+  Resources:
+    MySNSTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: "Vacancy-SNS-Topic-${opt:stage}.fifo"    
+        FifoTopic: true
+        ContentBasedDeduplication: true
+
+    MySQSQueueDLQ:
+      Type: "AWS::SQS::Queue"
+      Properties:
+        QueueName: "Vacancy-Queue-DLQ-${opt:stage}.fifo"
+        FifoQueue: true
+        ContentBasedDeduplication: true
+
+    MySQSQueue:
+      Type: AWS::SQS::Queue
+      Properties: 
+        QueueName: Vacancy-Queue-${opt:stage}.fifo
+        FifoQueue: true
+        ContentBasedDeduplication: true
+        DelaySeconds: 0
+        MaximumMessageSize: 1024
+        MessageRetentionPeriod: 345600        
+        VisibilityTimeout: 180
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt:
+              - MySQSQueueDLQ
+              - Arn
+          maxReceiveCount: 3   
+    
+    SNSToQueueSQSPolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties: 
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: "allow-sns-messages"
+              Effect: Allow
+              Principal: 
+                Service: "sns.amazonaws.com"
+              Resource: 
+                Fn::GetAtt:
+                  - "MySQSQueue"
+                  - "Arn"
+              Action: 
+                - "SQS:SendMessage"
+              Condition:
+                ArnEquals:
+                  "aws:SourceArn":
+                    Ref: "MySNSTopic"
+        Queues:
+          - Ref: "MySQSQueue"
+
+    QueueSubscription:
+      Type: 'AWS::SNS::Subscription'
+      Properties:
+        TopicArn: 
+          Fn::Join:
+              - ':'
+              - - 'arn:aws:sns'
+                - Ref: 'AWS::Region'
+                - Ref: 'AWS::AccountId'
+                - 'Vacancy-SNS-Topic-${opt:stage}.fifo'
+        Endpoint: 
+          Fn::GetAtt:
+          - MySQSQueue
+          - Arn
+        Protocol: sqs
+        RawMessageDelivery: true
+          
